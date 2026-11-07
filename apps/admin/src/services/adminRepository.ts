@@ -1,0 +1,53 @@
+import type { Database } from '../types/database'
+import { supabase } from './supabase'
+
+type T = Database['public']['Tables']
+export type DogRow = T['dogs']['Row']
+export type ReportRow = T['member_reports']['Row']
+export type HealthRow = T['health_records']['Row']
+export type IconRow = T['care_icons']['Row']
+export type CollarRow = T['collars']['Row']
+export type NoteRow = T['admin_notes']['Row']
+type DogSaveStage = 'dog-create' | 'dog-update' | 'photo-upload' | 'photo-reference' | 'photo-delete'
+type SupabaseFailure = { message?: unknown; code?: unknown; error?: unknown; details?: unknown; hint?: unknown; status?: unknown; statusCode?: unknown }
+
+const db = () => { if (!supabase) throw new Error('Supabase yapılandırılmadı.'); return supabase }
+const bad = (message: string): never => { throw new Error(message) }
+function failureDetails(error: unknown) {
+  const source = (error ?? {}) as SupabaseFailure
+  const status = typeof source.status === 'number' ? source.status : Number(source.statusCode)
+  return { message: typeof source.message === 'string' ? source.message : undefined, code: typeof source.code === 'string' ? source.code : typeof source.error === 'string' ? source.error : undefined, details: typeof source.details === 'string' ? source.details : undefined, hint: typeof source.hint === 'string' ? source.hint : undefined, status: Number.isFinite(status) ? status : undefined }
+}
+function dogSaveMessage(stage: DogSaveStage, error: unknown) {
+  const details = failureDetails(error)
+  if (import.meta.env.DEV) console.warn(`Dog save failed at ${stage}`, details)
+  if (details.code === '42501' || details.status === 401 || details.status === 403) return 'Bu işlem için yönetici yetkiniz bulunmuyor.'
+  if (stage === 'photo-upload') {
+    const message = details.message?.toLocaleLowerCase('tr-TR') ?? ''
+    if (message.includes('bucket') && (message.includes('not found') || message.includes('does not exist'))) return 'Fotoğraf depolama alanı hazır değil. dog-images kurulumu kontrol edilmelidir.'
+    if (details.code === 'AccessDenied' && message.includes('row-level security')) return 'Fotoğraf yükleme isteği depolama güvenlik politikası tarafından reddedildi.'
+    return 'Fotoğraf yüklenemedi.'
+  }
+  if (stage === 'photo-reference') return 'Fotoğraf veritabanına bağlanamadı.'
+  if (stage === 'photo-delete') return 'Önceki fotoğraf depolamadan kaldırılamadı.'
+  return 'Köpek bilgileri kaydedilemedi.'
+}
+function dogSaveFailure(stage: DogSaveStage, error: unknown): never { throw new Error(dogSaveMessage(stage, error)) }
+
+export const adminRepository = {
+  async dashboard() { const c = db(); const [d, r, rr] = await Promise.all([c.from('dogs').select('id, name, public_health_status', { count: 'exact' }).eq('is_active', true), c.from('member_reports').select('id', { count: 'exact' }).eq('status', 'new'), c.from('member_reports').select('*').eq('status', 'new').order('created_at', { ascending: false })]); if (d.error || r.error || rr.error) bad('Pano verileri alınamadı.'); const dogs = d.data ?? []; return { activeDogs: d.count ?? 0, observationDogs: dogs.filter(x => x.public_health_status === 'under_observation').length, treatmentDogs: dogs.filter(x => x.public_health_status === 'under_treatment').length, recoveringDogs: dogs.filter(x => x.public_health_status === 'recovering').length, newReports: r.count ?? 0, reports: rr.data ?? [] } },
+  async listDogs() { const { data, error } = await db().from('dogs').select('*').order('name'); if (error) bad('Köpekler alınamadı.'); return data ?? [] },
+  async dog(id: string) { const { data, error } = await db().from('dogs').select('*').eq('id', id).single(); if (error || !data) bad('Köpek profili alınamadı.'); return data },
+  async saveDog(values: T['dogs']['Insert'] | T['dogs']['Update'], id?: string, stage: DogSaveStage = id ? 'dog-update' : 'dog-create'): Promise<DogRow> { const query = id ? db().from('dogs').update(values).eq('id', id) : db().from('dogs').insert(values as T['dogs']['Insert']); const { data, error } = await query.select().single(); if (error || !data) dogSaveFailure(stage, error); return data as DogRow },
+  async uploadDogPhoto(dogId: string, file: File) { const client = db(); const { data: { user }, error: userError } = await client.auth.getUser(); if (userError || !user) bad('Fotoğraf yüklemek için yönetici oturumu gereklidir.'); const { data: isAdmin, error: adminError } = await client.rpc('is_admin'); if (adminError || !isAdmin) bad('Bu işlem için yönetici yetkiniz bulunmuyor.'); const extension = file.type === 'image/png' ? 'png' : file.type === 'image/webp' ? 'webp' : 'jpg'; const path = `dogs/${dogId}/${crypto.randomUUID()}.${extension}`; const { error } = await client.storage.from('dog-images').upload(path, file, { contentType: file.type, upsert: false }); if (error) dogSaveFailure('photo-upload', error); return path },
+  async removeDogPhoto(path: string) { if (path.startsWith('http')) return; const { error } = await db().storage.from('dog-images').remove([path]); if (error) dogSaveFailure('photo-delete', error) },
+  async dogPhotoUrl(path: string | null) { if (!path) return null; return path.startsWith('http') ? path : db().storage.from('dog-images').getPublicUrl(path).data.publicUrl },
+  async deactivateDog(id: string) { const { error } = await db().from('dogs').update({ is_active: false }).eq('id', id); if (error) bad('Köpek pasife alınamadı.') },
+  async healthForDog(dog_id: string) { const { data, error } = await db().from('health_records').select('*').eq('dog_id', dog_id).order('recorded_at', { ascending: false }); if (error) bad('Sağlık geçmişi alınamadı.'); return data ?? [] }, async listHealth() { const { data, error } = await db().from('health_records').select('*').order('recorded_at', { ascending: false }); if (error) bad('Sağlık kayıtları alınamadı.'); return data ?? [] }, async saveHealth(v: T['health_records']['Insert'], id?: string) { const { error } = id ? await db().from('health_records').update(v).eq('id', id) : await db().from('health_records').insert(v); if (error) bad('Sağlık kaydı kaydedilemedi.') }, async deleteHealth(id: string) { const { error } = await db().from('health_records').delete().eq('id', id); if (error) bad('Sağlık kaydı silinemedi.') },
+  async icons() { const { data, error } = await db().from('care_icons').select('*').order('name'); if (error) bad('Bakım ikonları alınamadı.'); return data ?? [] }, async saveIcon(v: T['care_icons']['Insert'], id?: string) { const { error } = id ? await db().from('care_icons').update(v).eq('id', id) : await db().from('care_icons').insert(v); if (error) bad('Bakım ikonu kaydedilemedi.') }, async dogIconIds(dog_id: string) { const { data, error } = await db().from('dog_care_icons').select('care_icon_id').eq('dog_id', dog_id); if (error) bad('Bakım ikonları alınamadı.'); return (data ?? []).map(x => x.care_icon_id) }, async setDogIcons(dog_id: string, ids: string[]) { const c = db(); const { error: removeError } = await c.from('dog_care_icons').delete().eq('dog_id', dog_id); if (removeError) bad('Bakım ikonları güncellenemedi.'); if (ids.length) { const { error } = await c.from('dog_care_icons').insert(ids.map(care_icon_id => ({ dog_id, care_icon_id }))); if (error) bad('Bakım ikonları güncellenemedi.') } },
+  async notes(dog_id: string) { const { data, error } = await db().from('admin_notes').select('*').eq('dog_id', dog_id).order('created_at', { ascending: false }); if (error) bad('Özel notlar alınamadı.'); return data ?? [] }, async saveNote(v: T['admin_notes']['Insert'], id?: string) { const { error } = id ? await db().from('admin_notes').update({ body: v.body }).eq('id', id) : await db().from('admin_notes').insert(v); if (error) bad('Özel not kaydedilemedi.') }, async location(dog_id: string) { const { data, error } = await db().from('dog_locations').select('*').eq('dog_id', dog_id).maybeSingle(); if (error) bad('Konum bilgisi alınamadı.'); return data },
+  async dogsWithLocations() { const c = db(); const [dogs, locations] = await Promise.all([c.from('dogs').select('*').order('name'), c.from('dog_locations').select('*')]); if (dogs.error || locations.error) bad('Köpek konumları alınamadı.'); const byDogID = new Map((locations.data ?? []).map(location => [location.dog_id, location])); return (dogs.data ?? []).map(dog => ({ dog, location: byDogID.get(dog.id) ?? null })) },
+  async listReports() { const { data, error } = await db().from('member_reports').select('*').order('created_at', { ascending: false }); if (error) bad('Bildirimler alınamadı.'); return data ?? [] }, async updateReport(id: string, v: T['member_reports']['Update']) { const { error } = await db().from('member_reports').update(v).eq('id', id); if (error) bad('Bildirim güncellenemedi.') }, async reportImageUrl(path: string) { const { data, error } = await db().storage.from('report-images').createSignedUrl(path, 60); if (error || !data) bad('Özel görsel bağlantısı oluşturulamadı.'); return data!.signedUrl },
+  async listAnnouncements() { const { data, error } = await db().from('announcements').select('*').order('created_at', { ascending: false }); if (error) bad('Duyurular alınamadı.'); return data ?? [] }, async saveAnnouncement(v: T['announcements']['Insert'] | T['announcements']['Update'], id?: string) { const { error } = id ? await db().from('announcements').update(v).eq('id', id) : await db().from('announcements').insert(v as T['announcements']['Insert']); if (error) bad('Duyuru kaydedilemedi.') }, async deleteAnnouncement(id: string) { const { error } = await db().from('announcements').delete().eq('id', id); if (error) bad('Duyuru silinemedi.') },
+  async collars() { const { data, error } = await db().from('collars').select('*').order('created_at', { ascending: false }); if (error) bad('Tasmalar alınamadı.'); return data ?? [] }, async saveCollar(v: T['collars']['Insert'], id?: string) { const { error } = id ? await db().from('collars').update(v).eq('id', id) : await db().from('collars').insert(v); if (error) bad('Tasma kaydedilemedi.') }, async assignments() { const { data, error } = await db().from('dog_collar_assignments').select('*').is('unassigned_at', null); if (error) bad('Atamalar alınamadı.'); return data ?? [] }, async assignCollar(dog_id: string, collar_id: string) { const { error } = await db().from('dog_collar_assignments').insert({ dog_id, collar_id }); if (error) bad('Atama kaydedilemedi. Her köpek ve tasmanın yalnızca bir etkin ataması olabilir.') }, async unassignCollar(id: string) { const { error } = await db().from('dog_collar_assignments').update({ unassigned_at: new Date().toISOString() }).eq('id', id); if (error) bad('Atama kaldırılamadı.') },
+}

@@ -1,0 +1,4 @@
+// Safe defaults. The optional, untracked file below overrides these values locally.
+SUPABASE_URL =
+SUPABASE_PUBLISHABLE_KEY =
+#include? "Supabase.xcconfig"

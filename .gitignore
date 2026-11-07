@@ -1,0 +1,31 @@
+# Environment and machine-local configuration
+.env
+.env.*
+!.env.example
+!.env.*.example
+apps/ios/Config/Supabase.xcconfig
+apps/ios/Config/Supabase.xcconfig.save
+apps/ios/CampusDogs/Config/Supabase.plist
+
+# JavaScript dependencies, output and caches
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# Xcode / Swift build and per-user state
+DerivedData/
+build/
+xcuserdata/
+*.xcuserstate
+*.xcarchive
+*.ipa
+
+# Supabase local temporary artifacts
+supabase/.temp/
+
+# OS and editor artifacts
+.DS_Store
+*.swp
+*.swo
+*~

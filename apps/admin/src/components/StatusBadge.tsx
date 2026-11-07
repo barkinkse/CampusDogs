@@ -1,0 +1,1 @@
+export function StatusBadge({ children }: { children: string }) { const kind = children === 'Normal' || children === 'Yayınlandı' ? 'good' : children === 'Yüksek' || children === 'Tedavi Altında' ? 'danger' : 'warn'; return <span className={`badge ${kind}`}>{children}</span> }

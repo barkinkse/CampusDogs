@@ -1,0 +1,6 @@
+project_id = "campus-dogs"
+[api]
+enabled = true
+port = 54321
+[db]
+port = 54322
